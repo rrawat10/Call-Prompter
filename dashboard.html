@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="multi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Call Prompter</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0b1120;color:#e5e7eb;font:14px Arial,sans-serif}
+header{height:58px;padding:0 20px;background:#020617;border-bottom:1px solid #1f2937;display:flex;align-items:center;justify-content:space-between}
+h1,h2{margin:0}
+h1{font-size:17px}
+h2{font-size:14px;margin-bottom:10px}
+#status{font-size:12px;color:#94a3b8}
+.layout{display:grid;grid-template-columns:1.5fr .8fr;gap:14px;padding:14px;height:calc(100vh - 58px)}
+.panel{background:#111827;border:1px solid #1f2937;border-radius:9px;padding:14px;min-height:0;display:flex;flex-direction:column}
+.live{background:#0f172a;border:1px solid #263244;border-radius:7px;padding:10px;margin-bottom:8px;min-height:58px}
+.label{font-size:10px;text-transform:uppercase;font-weight:bold;color:#94a3b8;margin-bottom:5px}
+.liveText{font-size:15px;min-height:20px;color:#f8fafc}
+#completed{overflow-y:auto;flex:1}
+.turn{padding:10px 3px;border-bottom:1px solid #1f2937}
+.meta{font-size:11px;color:#94a3b8;margin-bottom:4px}
+.text{font-size:14px;line-height:1.45;color:#f8fafc}
+.flag{margin-top:7px;padding:8px 10px;border-left:3px solid #ef4444;background:#1f1115;border-radius:4px;font-size:12px;line-height:1.45}
+.clean{margin-top:5px;font-size:11px;color:#64748b}
+.empty{color:#64748b}
+.issue{padding:10px;margin-bottom:9px;border:1px solid #7f1d1d;background:#1f1115;border-radius:6px;font-size:12px;line-height:1.45}
+.issue .quote{margin:6px 0;color:#fff;font-style:italic}
+.issue b{color:#fca5a5}
+.neutral{margin-top:5px;font-size:11px;color:#64748b}
+#monitor{overflow-y:auto;flex:1}
+@media(max-width:800px){
+.layout{grid-template-columns:1fr;height:auto}
+.panel{min-height:400px}
+}
+</style>
+</head>
+
+<body>
+
+<header>
+<h1>Call Prompter <span style="color:#64748b;font-weight:normal">Live Conversation Monitor</span></h1>
+<div id="status">Connecting...</div>
+</header>
+
+<div class="layout">
+
+<section class="panel">
+
+<h2>Live Conversation</h2>
+
+<div class="live">
+<div class="label">Customer</div>
+<div id="customerLive" class="liveText">Waiting...</div>
+</div>
+
+<div class="live">
+<div class="label">Agent</div>
+<div id="agentLive" class="liveText">Waiting...</div>
+</div>
+
+<h2>Completed Turns</h2>
+
+<div id="completed">
+<div class="empty">Waiting for conversation...</div>
+</div>
+
+</section>
+
+<section class="panel">
+
+<h2>Live Quality Monitor</h2>
+
+<div id="monitor">
+<div class="empty">No issues detected.</div>
+</div>
+
+</section>
+
+</div>
+
+<script>
+const statusEl=document.getElementById("status");
+const customerLive=document.getElementById("customerLive");
+const agentLive=document.getElementById("agentLive");
+const completed=document.getElementById("completed");
+const monitor=document.getElementById("monitor");
+
+const ws=new WebSocket(
+    `${location.protocol==="https:"?"wss":"ws"}://${location.host}/ws/dashboard`
+);
+
+ws.onopen=()=>{
+    statusEl.textContent="Connected - waiting for audio";
+};
+
+ws.onclose=()=>{
+    statusEl.textContent="Dashboard disconnected";
+};
+
+ws.onerror=()=>{
+    statusEl.textContent="Dashboard WebSocket error";
+};
+
+function esc(v){
+    const e=document.createElement("span");
+    e.textContent=v??"";
+    return e.innerHTML;
+}
+
+function time(v){
+    try{
+        return new Date(v).toLocaleTimeString([],{
+            hour:"numeric",
+            minute:"2-digit",
+            second:"2-digit"
+        });
+    }catch{
+        return "";
+    }
+}
+
+function live(d){
+    const el=d.speaker==="Agent"
+        ?agentLive
+        :customerLive;
+
+    el.textContent=d.text||"Waiting...";
+}
+
+function completedTurn(d){
+
+    const empty=completed.querySelector(".empty");
+    if(empty)empty.remove();
+
+    const row=document.createElement("div");
+
+    row.className="turn";
+
+    /*
+      IMPORTANT:
+      Use speaker + turn_number instead of timestamp
+      so analysis_complete can find the exact turn.
+    */
+    row.dataset.speaker=d.speaker||"Unknown";
+    row.dataset.turn=d.turn_number??"";
+
+    row.innerHTML=`
+        <div class="meta">
+            ${esc(d.speaker||"Unknown")}
+            ·
+            ${esc(time(d.timestamp))}
+        </div>
+
+        <div class="text">
+            ${esc(d.text)}
+        </div>
+
+        <div class="clean">
+            Quality check: analyzing...
+        </div>
+    `;
+
+    completed.appendChild(row);
+    completed.scrollTop=completed.scrollHeight;
+}
+
+function findTurn(d){
+
+    const rows=[
+        ...completed.querySelectorAll(".turn")
+    ];
+
+    return rows.find(row=>
+        row.dataset.speaker===(d.speaker||"") &&
+        row.dataset.turn===String(
+            d.turn_number??""
+        )
+    );
+}
+
+function analysisComplete(d){
+
+    const row=findTurn(d);
+
+    if(!row)return;
+
+    const checking=row.querySelector(".clean");
+
+    if(checking){
+        checking.remove();
+    }
+
+    /*
+      Neutral turns get a small neutral status.
+      You can remove this if you want absolutely
+      nothing displayed for normal conversation.
+    */
+    if(!d.flagged){
+
+        const neutral=document.createElement("div");
+
+        neutral.className="neutral";
+
+        neutral.textContent="Quality check: OK";
+
+        row.appendChild(neutral);
+
+        return;
+    }
+}
+
+function flag(d){
+
+    const row=findTurn(d);
+
+    if(row){
+
+        const checking=row.querySelector(".clean");
+
+        if(checking){
+            checking.remove();
+        }
+
+        const oldFlag=row.querySelector(".flag");
+
+        if(!oldFlag){
+
+            const f=document.createElement("div");
+
+            f.className="flag";
+
+            f.innerHTML=`
+                <b>
+                    ⚠ ${esc(d.severity||"medium")}
+                </b>
+                <br>
+                ${esc(
+                    d.reason||
+                    "Improper language detected."
+                )}
+                <br>
+                <b>Advice:</b>
+                ${esc(
+                    d.advice||
+                    "Please remain polite, calm, respectful, and professional."
+                )}
+            `;
+
+            row.appendChild(f);
+        }
+    }
+
+    const empty=monitor.querySelector(".empty");
+
+    if(empty)empty.remove();
+
+    const m=document.createElement("div");
+
+    m.className="issue";
+
+    m.innerHTML=`
+        <b>
+            ⚠ ${esc(d.speaker)}
+            ·
+            ${esc(d.severity||"medium")}
+        </b>
+
+        <div class="quote">
+            “${esc(d.text)}”
+        </div>
+
+        ${esc(
+            d.reason||
+            "Improper language detected."
+        )}
+
+        <br>
+
+        <b>Advice:</b>
+        ${esc(
+            d.advice||
+            "Please remain polite, calm, respectful, and professional."
+        )}
+    `;
+
+    monitor.prepend(m);
+}
+
+ws.onmessage=e=>{
+
+    let d;
+
+    try{
+        d=JSON.parse(e.data);
+    }catch{
+        return;
+    }
+
+    console.log("[dashboard]",d);
+
+    /* -----------------------------------------
+       CALL STARTED
+    ----------------------------------------- */
+
+    if(d.type==="call_started"){
+
+        statusEl.textContent=
+            "Connected - call active";
+
+        customerLive.textContent="Waiting...";
+        agentLive.textContent="Waiting...";
+
+        return;
+    }
+
+    /* -----------------------------------------
+       TRANSCRIPT
+    ----------------------------------------- */
+
+    if(d.type==="transcript_update"){
+
+        /*
+          LIVE interim transcript
+        */
+        if(
+            d.turn_status==="live" &&
+            !d.speech_final
+        ){
+
+            live(d);
+
+            return;
+        }
+
+        /*
+          COMPLETED conversational turn
+        */
+        if(
+            d.turn_status==="completed" &&
+            d.speech_final
+        ){
+
+            completedTurn(d);
+
+            (
+                d.speaker==="Agent"
+                ?agentLive
+                :customerLive
+            ).textContent="Waiting...";
+
+            return;
+        }
+
+        return;
+    }
+
+    /* -----------------------------------------
+       ANALYSIS FINISHED
+       IMPORTANT FIX
+    ----------------------------------------- */
+
+    if(d.type==="analysis_complete"){
+
+        console.log(
+            "[QUALITY COMPLETE]",
+            d.speaker,
+            "Turn:",
+            d.turn_number,
+            "Flagged:",
+            d.flagged
+        );
+
+        analysisComplete(d);
+
+        return;
+    }
+
+    /* -----------------------------------------
+       FLAG
+    ----------------------------------------- */
+
+    if(d.type==="flag"){
+
+        console.log(
+            "[FLAG]",
+            d.speaker,
+            d.severity,
+            d.category,
+            d.text
+        );
+
+        flag(d);
+
+        return;
+    }
+
+    /* -----------------------------------------
+       CALL STOPPED
+    ----------------------------------------- */
+
+    if(d.type==="call_stopped"){
+
+        statusEl.textContent="Call stopped";
+
+        customerLive.textContent="Waiting...";
+        agentLive.textContent="Waiting...";
+
+        return;
+    }
+};
+</script>
+
+</body>
+</html>
